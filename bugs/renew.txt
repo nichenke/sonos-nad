@@ -1,0 +1,15 @@
+INFO:soco.events:Autorenewing subscription uuid:RINCON_B8E93798864E01400_sub0000000566
+INFO:requests.packages.urllib3.connectionpool:Starting new HTTP connection (1): 192.168.86.36
+Exception in thread Thread-3:
+Traceback (most recent call last):
+  File "/usr/lib/python2.7/threading.py", line 810, in __bootstrap_inner
+    self.run()
+  File "/home/pi/sonos-nad/new-soco/src/soco/soco/events.py", line 425, in run
+    sub.renew()
+  File "/home/pi/sonos-nad/new-soco/src/soco/soco/events.py", line 531, in renew
+    response.raise_for_status()
+  File "/home/pi/sonos-nad/new-soco/local/lib/python2.7/site-packages/requests/models.py", line 862, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+HTTPError: 412 Client Error: Precondition Failed for url: http://192.168.86.36:1400/MediaRenderer/AVTransport/Event
+
+-- It doesn't seem to bubble up in my main loop, so how to detect & correct ?
