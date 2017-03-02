@@ -1,0 +1,5 @@
+flake8
+flake8-import-order
+pylint
+pytest
+pytest-cov

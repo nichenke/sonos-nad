@@ -1,0 +1,8 @@
+pyserial
+#
+# released version not updated enough for most recent firmware versions - event 0 causes an exception
+# https://github.com/SoCo/SoCo/issues/276
+# soco
+#-e git+https://github.com/SoCo/SoCo.git#egg=soco-0.11.2b1
+# trying new soco
+-e git+https://github.com/SoCo/SoCo.git#egg=soco-0.13.pre

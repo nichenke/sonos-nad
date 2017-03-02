@@ -1,0 +1,207 @@
+#!/usr/bin/env python
+
+import io
+import logging
+import sys
+import time
+
+from Queue import Empty, Queue
+from threading import Timer
+
+
+import serial
+import soco
+from soco.events import event_listener
+
+# TBD config file
+#SERIAL = '/dev/cu.usbserial-A103OJAJ'
+SERIAL = '/dev/ttyUSB0'
+
+SONOS = "Nic's Office"
+
+# data for NAD interaction
+SUPPORTED_MODELS = ['C356BEE', ]
+
+logging.basicConfig(level=logging.INFO)
+
+
+def find_sonos(desired):
+    """ find all the sonos """
+    zones = soco.discover(timeout=30, include_invisible=True)
+
+    if not zones:
+        logging.warn("discovery failed, should retry")
+        return None
+
+    for zone in zones:
+        logging.info("found Sonos: %s", zone.player_name)
+        if zone.player_name == desired:
+            return zone
+
+    raise ValueError('no Sonos found')
+
+
+class NADSerial(object):
+    """ NAD C356 based receiver connected via serial """
+
+    def __init__(self, port):
+        """ setup our own port """
+        self.port = port
+        self._ser = serial.Serial(self.port, 115200, timeout=1)
+
+        self._ser_io = io.TextIOWrapper(io.BufferedRWPair(self._ser, self._ser, 1),
+                                        newline='\r', line_buffering=True)
+        # self._ser_io = io.TextIOWrapper(io.BufferedRWPair(self._ser, self._ser, 1))
+        self.check_model()
+
+    def _run_cmd(self, command):
+        """ send command and receive output """
+	logging.info("flushing NAD comms before command")
+	self._ser_io.write(unicode('\r'))
+	self._ser_io.flush()
+	response = self._ser_io.readlines()
+	logging.info('flushing %d lines of dirty data', len(response))
+	for resp in response:
+		logging.info('flushed outstanding data: %s', resp)
+        logging.info("sending NAD command '%s'", command)
+        self._ser_io.write(unicode(command + '\r'))
+        self._ser_io.flush()
+        response = self._ser_io.readlines()
+        # not sure how to get TextIOWrapper or others to drop the leading newline, so we'll
+        # just assert for it and handle the 2nd line
+        assert len(response) == 2, "unknown response format: '%s'" % (','.join(response))
+        data = response[1]
+        assert data[-1] == '\r', "unknown data format: '%s'" % (data)
+        data = data[:-1]
+        logging.info("NAD response: '%s'", data)
+
+        param, value = data.split('=')
+        return (param, value)
+
+    def query(self, variable):
+        """ query current value of variable """
+        query_param = "Main." + variable
+        param, value = self._run_cmd(query_param + '?')
+        assert param == query_param
+        return value
+
+    def action(self, variable, state):
+        """ set a variable to a desired state """
+        var_param = "Main." + variable
+        param, value = self._run_cmd("%s=%s" % (var_param, state))
+        assert param == var_param
+        assert value == state
+
+    def check_model(self):
+        """ make sure this model is compatible """
+        model = self.query('Model')
+        logging.info("model is %s", model)
+
+        assert model in SUPPORTED_MODELS
+
+    def on(self):
+        # TODO - query power, input, volume -- set if not to initial states for power on
+        # if power on, leave alone volume but change input
+        self.action('Power', 'On')
+
+    def off(self):
+        """ turn power off """
+        self.action('Power', 'Off')
+
+SLOW_INTERVAL = 1
+
+# in seconds..
+OFF_TIMEOUT = 5 * 60
+
+TRIGGER_ON = ['PLAYING', 'TRANSITIONING']
+TRIGGER_OFF = ['PAUSED_PLAYBACK', 'STOPPED']
+
+# keep above root privs and for known firewall if needed
+#soco.config.EVENT_LISTENER_PORT = 11440
+
+
+class TransportHandler(object):
+    """ handle transport events from Sonos """
+
+    def __init__(self, nad_serial, off_timeout=OFF_TIMEOUT):
+        """ setup connection to NAD and get ready for events """
+        self._ser = nad_serial
+        self.state = 'UNKNOWN'
+        self._timer = None
+        self.off_timeout = float(off_timeout)
+
+    def process(self, event_data):
+        """ process new event data """
+        state = event_data.get('transport_state', self.state)
+        if state != self.state:
+            self.state = state
+
+            if state in TRIGGER_ON:
+                self.set_on()
+            elif state in TRIGGER_OFF:
+                self.set_off_timer()
+
+    def set_on(self):
+        """ turn on the things """
+        self.cancel_off_timer()
+        self._ser.on()
+
+    def set_off(self):
+        """ turn off the things """
+        self._ser.off()
+
+    def set_off_timer(self):
+        """ setup a timer to turn off """
+        logging.info("Pending off in %s seconds", self.off_timeout)
+        self._timer = Timer(self.off_timeout, self.set_off)
+        self._timer.start()
+
+    def cancel_off_timer(self):
+        """ abort a scheduled timer event """
+        if self._timer:
+            logging.info("cancel pending off timer")
+            self._timer.cancel()
+            self._timer = None
+
+def main():
+    """ run all the things """
+    logging.info("Setting up connection to NAD...")
+    ser = NADSerial(SERIAL)
+
+    # discovery can take a bit...
+    while True:
+        zone = find_sonos(SONOS)
+        if zone:
+            print zone
+            break
+        time.sleep(SLOW_INTERVAL)
+
+    event_queue = Queue()
+
+    # convert to context - with, ...
+    transport = zone.avTransport.subscribe(event_queue=event_queue, auto_renew=True)
+
+    # TODO cleanup somehow
+    transport_handler = TransportHandler(ser)
+
+    while True:
+        try:
+            event = event_queue.get(timeout=1)
+            logging.info("new event from %s: %s", event.service.service_id,
+                         event.variables)
+            if event.service.service_id == 'AVTransport':
+                transport_handler.process(event.variables)
+            else:
+                logging.error('unknown event service: %s', event.service.service_id)
+        except Empty:
+            pass
+        except KeyboardInterrupt:
+            logging.info("all done")
+            transport.unsubscribe()
+            transport_handler.cancel_off_timer()
+            event_listener.stop()
+            return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
